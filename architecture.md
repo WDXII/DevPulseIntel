@@ -31,9 +31,10 @@ ANALYTICS.DT_ANALYTICS_DEVELOPERS (professional devs only, business logic, deriv
      │  Cortex LLM Functions               │  Cortex ML FORECAST
      │  SENTIMENT / COMPLETE /             │  (salary by experience)
      │  CLASSIFY_TEXT                      │
+     │  (applied to 10% sample)            │
      ▼                                     ▼
 ENRICHED.ENRICHED_RESPONSES        ENRICHED.SALARY_FORECAST_RESULTS
-     │                             ENRICHED.SALARY_BENCHMARKS
+(~6,500 sampled rows)              ENRICHED.SALARY_BENCHMARKS
      │
      ├─────────────────────────────────────┐
      │                                     │
@@ -72,7 +73,7 @@ ENRICHED.DEVPULSE_SEARCH           Streamlit in Snowflake
 
 ### Layer 4 — ENRICHED (Standard Tables)
 - **Philosophy:** Run AI once, store forever. Never compute Cortex functions at query time.
-- `ENRICHED_RESPONSES`: all Cortex LLM outputs as physical columns.
+- `ENRICHED_RESPONSES`: all Cortex LLM outputs as physical columns. Populated from ANALYTICS with a `SAMPLE (10 PERCENT)` clause (~6,500 professional developers).
 - `SALARY_FORECAST_RESULTS`: Cortex ML FORECAST predictions.
 - `SALARY_BENCHMARKS`: pre-aggregated percentile table for the Streamlit salary widget.
 - `DEVPULSE_SEARCH`: Cortex Search service indexed on composite profile text.
@@ -118,7 +119,7 @@ ENRICHED.DEVPULSE_SEARCH           Streamlit in Snowflake
 | Schema | Table | Type | Rows | Purpose |
 |---|---|---|---|---|
 | `RAW` | `RAW_SURVEY_RESPONSES` | Standard Table | ~65K | COPY INTO target; 114 columns all VARCHAR |
-| `ENRICHED` | `ENRICHED_RESPONSES` | Standard Table | ~65K | Cortex LLM outputs materialized |
+| `ENRICHED` | `ENRICHED_RESPONSES` | Standard Table | ~6.5K (sample) | Cortex LLM outputs materialized on 10% sample |
 | `ENRICHED` | `SALARY_FORECAST_RESULTS` | Standard Table | Variable | Cortex ML FORECAST predictions per country |
 | `ENRICHED` | `SALARY_BENCHMARKS` | Standard Table | Variable | Pre-aggregated salary percentiles |
 
@@ -139,14 +140,14 @@ ENRICHED.DEVPULSE_SEARCH           Streamlit in Snowflake
 | `ENRICHED` | `V_SEARCH_PROFILES` | Composite profile text for Cortex Search indexing |
 
 ### 3.9 Cortex Objects
-| Type | Name | Method | Input | Output |
-|---|---|---|---|---|
-| LLM Function | Sentiment scoring | `CORTEX.SENTIMENT()` | `JOB_SAT` text | Float score −1 to 1 |
-| LLM Function | Skill clustering | `CORTEX.COMPLETE()` | `LANGUAGE_HAVE_WORKED_WITH` | Skill cluster label |
-| LLM Function | Role standardization | `CORTEX.CLASSIFY_TEXT()` | `DEV_TYPE` | Standardized role category |
-| LLM Function | AI attitude | `CORTEX.CLASSIFY_TEXT()` | `AI_SENTIMENT_RAW` | Enthusiast / Cautious / Skeptic / Neutral |
-| ML Model | `SALARY_FORECAST_MODEL` | `SNOWFLAKE.ML.FORECAST` | Experience × country median salary | Predicted salary |
-| Search Service | `DEVPULSE_SEARCH` | Cortex Search | `V_SEARCH_PROFILES.PROFILE_TEXT` | Semantic search results |
+| Type | Name | Method | Input | Output | Scope |
+|---|---|---|---|---|---|
+| LLM Function | Sentiment scoring | `CORTEX.SENTIMENT()` | `JOB_SAT` text | Float score −1 to 1 | 10% sample |
+| LLM Function | Skill clustering | `CORTEX.COMPLETE()` | `LANGUAGE_HAVE_WORKED_WITH` | Skill cluster label | 10% sample |
+| LLM Function | Role standardization | `CORTEX.CLASSIFY_TEXT()` | `DEV_TYPE` | Standardized role category | 10% sample |
+| LLM Function | AI attitude | `CORTEX.CLASSIFY_TEXT()` | `AI_SENTIMENT_RAW` | Enthusiast / Cautious / Skeptic / Neutral | 10% sample |
+| ML Model | `SALARY_FORECAST_MODEL` | `SNOWFLAKE.ML.FORECAST` | Experience × country median salary | Predicted salary | Full dataset |
+| Search Service | `DEVPULSE_SEARCH` | Cortex Search | `V_SEARCH_PROFILES.PROFILE_TEXT` | Semantic search results | 10% sample |
 
 ### 3.10 Streamlit App
 | Name | Warehouse | Schema | Views |
@@ -215,20 +216,73 @@ DESCRIBE TABLE DEVPULSEINTEL.RAW.RAW_SURVEY_RESPONSES;
 
 ## 7. Credit Cost Estimates
 
-| Operation | Estimated Credits | Frequency |
-|---|---|---|
-| COPY INTO — 65K rows, XSMALL | < 0.1 | Once |
-| Dynamic Table refresh × 2, XSMALL | < 0.2 | Once |
-| Cortex SENTIMENT — 65K rows | ~0.3 | Once |
-| Cortex CLASSIFY_TEXT (roles) — 65K rows | ~0.3 | Once |
-| Cortex COMPLETE (skill clusters) — 65K rows | ~0.5 | Once |
-| Cortex CLASSIFY_TEXT (AI attitude) — 65K rows | ~0.3 | Once |
-| Cortex ML FORECAST training | ~0.5 | Once |
-| Cortex Search service creation | ~0.2 | Once |
-| Streamlit app sessions (demo use) | ~0.5 | Ongoing (minimal) |
-| **Total estimate** | **~2.9 credits** | |
+### Design Assumption: 10% Sampling for Cortex LLM
 
-Snowflake Trial provides $400 in credits. This project uses well under 1% of the allotment.
+**All Cortex LLM enrichment functions are applied to a 10% random sample** of professional developers (~6,500 rows) from `ANALYTICS.DT_ANALYTICS_DEVELOPERS`. This is a deliberate cost-efficiency tradeoff:
+
+- **Full-dataset enrichment (65,000 rows):** ~$70–$88 in AI_SERVICES credits
+- **Sampled enrichment (6,500 rows, 10%):** ~$7–$10 in AI_SERVICES credits
+- **Benefit:** Produces meaningful aggregations in all Streamlit views while reducing cost by 90%
+
+The sample is applied in `04_cortex_enrich.sql` Section 2:
+```sql
+INSERT INTO ENRICHED.ENRICHED_RESPONSES
+SELECT * FROM ANALYTICS.DT_ANALYTICS_DEVELOPERS
+SAMPLE (10 PERCENT);  ← Sampling reduces Cortex LLM cost
+```
+
+See **setup.md → Step 5** and **README.md → Cost Profile** for full context.
+
+---
+
+### Estimated Cost Breakdown (with 10% sampling)
+
+| Operation | Rows | Estimated Credits | Frequency | Notes |
+|---|---|---|---|---|
+| COPY INTO raw load | 65K | < 0.1 | Once | Initial load |
+| Dynamic Table refresh (CLEAN) | 65K | < 0.05 | Once | One-time manual refresh |
+| Dynamic Table refresh (ANALYTICS) | ~50K | < 0.05 | Once | One-time manual refresh |
+| Cortex SENTIMENT | 6.5K | ~0.03 | Once | 10% sample |
+| Cortex CLASSIFY_TEXT (roles) | 6.5K | ~0.03 | Once | 10% sample |
+| Cortex COMPLETE (skill clusters) | 6.5K | ~0.05 | Once | 10% sample, longest running |
+| Cortex CLASSIFY_TEXT (AI attitude) | 6.5K | ~0.03 | Once | 10% sample |
+| Cortex ML FORECAST training | 50K | ~0.5 | Once | Full dataset aggregation |
+| Cortex Search service creation | 6.5K | ~0.2 | Once | 10% sample indexing |
+| Streamlit app sessions | — | ~0.5 | Ongoing | Demo use, minimal |
+| **Subtotal — Warehouse Compute** | | **~1–2** | | |
+| **AI_SERVICES (Cortex LLM tokens)** | | **~7–10** | | |
+| **Total estimate (sampled)** | | **~8–12 credits (~$3–$5 USD)** | | |
+
+---
+
+### What If Full-Dataset Enrichment Is Applied?
+
+If the `SAMPLE(10 PERCENT)` clause is omitted from `04_cortex_enrich.sql` Section 2:
+
+| Operation | Rows | Estimated Credits | Notes |
+|---|---|---|---|
+| Cortex SENTIMENT | 65K | ~0.3 | Full dataset |
+| Cortex CLASSIFY_TEXT (roles) | 65K | ~0.3 | Full dataset |
+| Cortex COMPLETE (skill clusters) | 65K | ~0.5 | Full dataset, longest running |
+| Cortex CLASSIFY_TEXT (AI attitude) | 65K | ~0.3 | Full dataset |
+| **AI_SERVICES subtotal** | | **~$70–$88** | **17x cost of sampled approach** |
+| **Total project cost** | | **~$75–$90** | |
+
+This is **not an error** — it's the real cost of full-dataset Cortex LLM enrichment at scale. See **README.md → Cost Retrospective** for the detailed analysis of why the original BRD underestimated this cost.
+
+---
+
+### Warehouse Compute Estimates (both scenarios)
+
+Warehouse compute is identical regardless of sampling (same ingestion, same Dynamic Table refresh, same ML training on aggregates):
+
+| Component | Estimated Credits |
+|---|---|
+| Ingestion (LOAD_WH) | < 0.5 |
+| Transformation (TRANSFORM_WH) | < 0.5 |
+| ML Training (CORTEX_WH) | < 0.5 |
+| App Sessions (APP_WH) | < 1.0 |
+| **Total warehouse** | **~$2–3** |
 
 ---
 
@@ -248,6 +302,9 @@ Simpler object references, simpler for a portfolio project. A production system 
 
 ### Why XSMALL warehouses everywhere?
 This dataset (65K rows, 114 columns) fits comfortably in XSMALL compute. No warehouse needs to be larger. Cost minimization is explicit in the NFRs.
+
+### Why apply Cortex LLM to only 10% of data?
+Cortex LLM functions bill per token, making full-dataset enrichment prohibitively expensive for portfolio projects ($70–$88 vs. $7–$10). A 10% stratified sample (~6,500 rows) demonstrates full capability, produces meaningful analytical results, and keeps costs practical. This is a deliberate engineering tradeoff documented in **BRD.md Section 9 (revised)** and **README.md → Cost Profile**.
 
 ---
 
