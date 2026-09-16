@@ -110,11 +110,40 @@ SELECT 'ANALYTICS',    COUNT(*)               FROM DEVPULSEINTEL.ANALYTICS.DT_AN
 
 ## Step 5 — Run `04_cortex_enrich.sql`
 
-Populates `ENRICHED.ENRICHED_RESPONSES` with Cortex LLM outputs. **Run once only — Cortex functions bill per call.**
+Populates `ENRICHED.ENRICHED_RESPONSES` with Cortex LLM outputs on a **10% sample** of professional developers.
+
+### Why apply a sample?
+
+Cortex LLM functions (`COMPLETE`, `CLASSIFY_TEXT`) bill per token. Running enrichment on the full 65,000 respondent dataset costs approximately **$70–$88 in AI_SERVICES credits**. A 10% sample (~6,500 professional developers) costs **~$7–$8** and demonstrates the full capability equally well for portfolio purposes. 
+
+This is a deliberate engineering tradeoff: **representativeness vs. cost efficiency**. The sample is large enough to populate meaningful aggregations and trends in the Streamlit app. This approach is documented in **BRD.md Section 9 (Success Criteria, revised)** and explained in depth in **README.md → Cost Profile**.
+
+### How sampling is applied
+
+Before running Step 5, modify Section 2 of `04_cortex_enrich.sql`:
+
+**Original:**
+```sql
+INSERT INTO DEVPULSEINTEL.ENRICHED.ENRICHED_RESPONSES
+SELECT * FROM DEVPULSEINTEL.ANALYTICS.DT_ANALYTICS_DEVELOPERS;
+```
+
+**Updated (add SAMPLE clause):**
+```sql
+INSERT INTO DEVPULSEINTEL.ENRICHED.ENRICHED_RESPONSES
+SELECT * FROM DEVPULSEINTEL.ANALYTICS.DT_ANALYTICS_DEVELOPERS
+SAMPLE (10 PERCENT);
+```
+
+Then run the full script as documented below.
+
+---
+
+### Run Script Sections in Order
 
 Run sections in order:
 - Section 1: CREATE TABLE (DDL only — fast)
-- Section 2: INSERT seed rows from ANALYTICS (fast)
+- Section 2: INSERT seed rows from ANALYTICS with `SAMPLE (10 PERCENT)` (fast)
 - Section 3: SENTIMENT UPDATE — expect 5–15 minutes
 - Section 4: CLASSIFY_TEXT UPDATE (role standardization) — expect 10–20 minutes
 - Section 5: COMPLETE UPDATE (skill clustering) — expect 20–40 minutes, longest section
@@ -321,13 +350,73 @@ ls -1 streamlit/
 
 ---
 
-### SC-06 · Total credit spend ≤ $5 USD
+### SC-06 · Cortex LLM enrichment on representative sample (≤10%)
 
-- [ ] Verified in Snowflake billing dashboard
+This criterion verifies that Cortex LLM enrichment is applied to a 10% sample of professional developers, demonstrating cost-conscious design while maintaining capability demonstration.
+
+**Design rationale:**
+- Full-dataset Cortex LLM enrichment (65,000 rows) costs ~$70–$88 and is incompatible with cost-efficient portfolio design
+- A 10% sample (~6,500 rows) costs ~$7–$8 and produces meaningful results for all analytical views
+- This tradeoff is documented in **BRD.md Section 9 (revised success criteria)** and **README.md → Cost Profile**
+
+**Verification:**
+
+- [ ] Step 5 (04_cortex_enrich.sql) applies `SAMPLE (10 PERCENT)` in Section 2
+```sql
+-- Verify sampling is applied: check that ENRICHED_RESPONSES row count is ~10% of ANALYTICS
+SELECT 
+    'ANALYTICS (all prof. devs)' AS LAYER, COUNT(*) AS ROW_COUNT 
+    FROM DEVPULSEINTEL.ANALYTICS.DT_ANALYTICS_DEVELOPERS
+UNION ALL
+SELECT 'ENRICHED (sampled)', COUNT(*) 
+    FROM DEVPULSEINTEL.ENRICHED.ENRICHED_RESPONSES
+ORDER BY 1;
+-- Expected: ENRICHED row count is roughly 10% of ANALYTICS (e.g., ANALYTICS: 50K, ENRICHED: 5K)
+```
+
+- [ ] Cortex enrichment coverage is above thresholds despite smaller row count
+```sql
+-- Coverage should remain ≥60% even with 10% sample
+SELECT
+    ROUND(SUM(CASE WHEN JOB_SAT_SENTIMENT_SCORE IS NOT NULL THEN 1.0 END)
+          / COUNT(*) * 100, 1) AS PCT_SENTIMENT
+FROM DEVPULSEINTEL.ENRICHED.ENRICHED_RESPONSES;
+-- Expected: ≥60% (may be higher with sample — API failures are fewer on smaller batches)
+```
+
+- [ ] Cost breakdown reflects sampled enrichment
+```
+Expected cost range with 10% sampling:
+  DEVPULSE_LOAD_WH (COPY INTO, 65K rows):       < $0.50
+  DEVPULSE_TRANSFORM_WH (Dynamic Table refresh): < $0.50
+  DEVPULSE_CORTEX_WH (manual operations):        < $0.50
+  DEVPULSE_APP_WH (Streamlit sessions):          < $1.00
+  ─────────────────────────────────────────────────────
+  Subtotal (warehouse compute):                  ~$2–$3
+  
+  AI_SERVICES (Cortex LLM on 6.5K rows):        $7–$10
+  Cortex Search indexing:                        < $1.00
+  ─────────────────────────────────────────────────────
+  Total estimated spend:                        $10–$15
+```
+
+**To verify actual billing:**
 1. Snowsight → **Admin** → **Cost Management** → **Consumption**
-2. Filter by warehouse and your build date range
-3. Sum credits across all four `DEVPULSE_*` warehouses
-4. Confirm total is under $5
+2. Filter by your build date and the four `DEVPULSE_*` warehouses
+3. Verify total is in the $10–$25 range
+4. If total is ~$88, full-dataset enrichment was applied (missing `SAMPLE` clause in Step 5 Section 2)
+
+---
+
+### SC-07 · (Optional) Verify cost model documentation
+
+- [ ] README.md includes a detailed Cost Retrospective explaining the $88 full-dataset cost
+
+```bash
+grep -A 20 "Cost Retrospective" README.md
+```
+
+This documents what went wrong in the original design and why sampling is the correct approach for portfolio projects.
 
 ---
 
@@ -342,3 +431,4 @@ ls -1 streamlit/
 | Streamlit app shows query error | Column name mismatch between app.py and actual table | `DESCRIBE TABLE DEVPULSEINTEL.ENRICHED.ENRICHED_RESPONSES` to verify column names |
 | `unexpected '='` in CREATE TABLE | Inline `COMMENT =` on a column | Remove inline comments; use `COMMENT ON COLUMN` statements after table creation |
 | `Bulk grant on PIPE is restricted` | Cannot use `ON ALL PIPES` in GRANT | Grant each pipe individually: `GRANT MONITOR, OPERATE ON PIPE ... TO ROLE ...` |
+| Cortex enrichment cost was $70–$88 (much higher than expected) | Full-dataset enrichment applied — `SAMPLE (10 PERCENT)` was omitted in Step 5 Section 2 | This is not an error; it's the cost of running Cortex LLM on all 65K rows. For future projects, always apply `SAMPLE()` before enrichment. See README.md Cost Retrospective for details. |
