@@ -135,9 +135,9 @@ Data Engineering Fundamentals
 
 ## Author
 
-[Your Name]
-[Your LinkedIn]
-[Your GitHub]
+William Daluyen
+https://www.linkedin.com/in/wdaluyen
+https://github.com/WDXII
 
 ---
 
