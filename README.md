@@ -33,6 +33,16 @@ Ask natural language questions about developer profiles using Cortex Search. Res
 
 ---
 
+## Screenshots
+
+### Salary Explorer — Experience & Distribution
+![Median salary by years of experience and developer distribution across salary bands](https://github.com/WDXII/DevPulseIntel/blob/main/screenshots/01_salary_explorer_experience_and_bands.png)
+
+### Cortex ML — Salary Forecast
+![Cortex ML FORECAST showing actual vs predicted developer salaries with 80% prediction intervals](https://github.com/WDXII/DevPulseIntel/blob/main/screenshots/02_cortex_ml_salary_forecast.png)
+
+---
+
 ## Project Structure
 
 ```
@@ -50,8 +60,12 @@ DevPulseIntel/
 │   ├── 05_cortex_ml.sql      # Cortex ML FORECAST model
 │   └── 06_cortex_search.sql  # Cortex Search service
 │
-└── streamlit/
-    └── app.py                # Streamlit in Snowflake application
+├── streamlit/
+│   └── app.py                # Streamlit in Snowflake application
+│
+└── screenshots/
+    ├── 01_salary_explorer_experience_and_bands.png
+    └── 02_cortex_ml_salary_forecast.png
 ```
 
 ---
@@ -135,9 +149,8 @@ Data Engineering Fundamentals
 
 ## Author
 
-William Daluyen
-https://www.linkedin.com/in/wdaluyen
-https://github.com/WDXII
+**William Daluyen**  
+[LinkedIn](https://www.linkedin.com/in/wdaluyen/) · [GitHub](https://github.com/WDXII/)
 
 ---
 
