@@ -1,311 +1,168 @@
-# Architecture
-## DevPulseIntel — Developer Ecosystem Intelligence Platform
+# Architecture: DevPulseIntel
+
+**As built:** May 2026 · **Documented:** September 2026
+This document describes the objects that were actually created by `sql/01–06` and `streamlit/app.py`. Design rationale is in [`decisions.md`](./decisions.md). Known defects are in [`README.md` → Known Issues](./README.md#known-issues--post-build-review).
 
 ---
 
-## 1. Overview
+## 1. Principles
 
-DevPulseIntel is fully Snowflake-native. No external orchestration, no external storage, no external dashboards. Every object — from ingestion through to the deployed application — lives within a single Snowflake account.
-
-```
-CSV File (local)
-     │
-     │  PUT (Snowsight UI or SnowSQL)
-     ▼
-@INGESTION.RAW_STAGE  ←── INGESTION.SURVEY_PIPE (Snowpipe — configured, demonstrates pattern)
-     │
-     │  COPY INTO
-     ▼
-RAW.RAW_SURVEY_RESPONSES           (114 survey cols + 2 metadata, all VARCHAR)
-     │
-     │  Dynamic Table
-     ▼
-CLEAN.DT_CLEAN_RESPONSES           (typed, aliased, null-handled, 1:1 rows)
-     │
-     │  Dynamic Table
-     ▼
-ANALYTICS.DT_ANALYTICS_DEVELOPERS (professional devs only, business logic, derived cols)
-     │
-     ├─────────────────────────────────────┐
-     │                                     │
-     │  Cortex LLM Functions               │  Cortex ML FORECAST
-     │  SENTIMENT / COMPLETE /             │  (salary by experience)
-     │  CLASSIFY_TEXT                      │
-     │  (applied to 10% sample)            │
-     ▼                                     ▼
-ENRICHED.ENRICHED_RESPONSES        ENRICHED.SALARY_FORECAST_RESULTS
-(~6,500 sampled rows)              ENRICHED.SALARY_BENCHMARKS
-     │
-     ├─────────────────────────────────────┐
-     │                                     │
-     ▼                                     ▼
-ENRICHED.DEVPULSE_SEARCH           Streamlit in Snowflake
-(Cortex Search Service)            DEVPULSEINTEL_APP
-```
+- **Snowflake-native only.** No external orchestration, storage, or compute.
+- **Medallion layering.** Each schema has one job: RAW keeps the source as-is, CLEAN types it, ANALYTICS applies business logic, and ENRICHED holds AI/ML output.
+- **Compute once, read many.** Cortex outputs are materialized into tables; the app never calls an LLM at query time. (Cortex Search is the exception: it is a query-time service by design.)
+- **No idle cost.** Dynamic Tables and the search service use `TARGET_LAG = '9999 days'`; warehouses are XS with 60-second auto-suspend.
 
 ---
 
-## 2. Medallion Architecture
+## 2. Data Flow
 
-### Layer 0 — INGESTION (Stage + Pipe)
-- **Philosophy:** Land the data. No transformation.
-- Internal named stage holds the raw CSV.
-- Snowpipe (`SURVEY_PIPE`) is configured and demonstrates event-driven ingestion capability even though data is static.
-
-### Layer 1 — RAW (Standard Table)
-- **Philosophy:** Source fidelity. Column names match the CSV headers exactly.
-- All 114 survey columns stored as VARCHAR — no casting, no business logic.
-- Two underscore-prefixed metadata columns: `_SOURCE_FILE_NAME` (from `METADATA$FILENAME`) and `_LOAD_TIMESTAMP` (table DEFAULT).
-- This layer is the ground truth. If anything goes wrong downstream, you can always reprocess from here.
-
-### Layer 2 — CLEAN (Dynamic Table)
-- **Philosophy:** Make data usable. One row in, one row out.
-- RAW column names (CSV-derived, e.g. `YEARSCODEPRO`) aliased to readable snake_case (`YEARS_CODE_PRO_INT`).
-- Type casting applied: experience fields to INTEGER, salary to FLOAT with outlier removal.
-- Reserved word `CHECK` renamed to `CHECK_COL` at RAW; aliased cleanly in CLEAN.
-- This is the only layer that references RAW column names. Nothing below CLEAN needs to know how the CSV was named.
-
-### Layer 3 — ANALYTICS (Dynamic Table)
-- **Philosophy:** Make data useful. Business logic and filters applied.
-- Professional developers only (excludes students, hobbyists).
-- Derived columns: SALARY_BAND, EXPERIENCE_BUCKET, PRIMARY_LANGUAGE, PRIMARY_DEV_ROLE, USES_AI_TOOLS, JOB_SAT_SCORE.
-- Both Dynamic Tables set to `TARGET_LAG = '9999 days'` — manual refresh only, no ongoing compute cost.
-
-### Layer 4 — ENRICHED (Standard Tables)
-- **Philosophy:** Run AI once, store forever. Never compute Cortex functions at query time.
-- `ENRICHED_RESPONSES`: all Cortex LLM outputs as physical columns. Populated from ANALYTICS with a `SAMPLE (10 PERCENT)` clause (~6,500 professional developers).
-- `SALARY_FORECAST_RESULTS`: Cortex ML FORECAST predictions.
-- `SALARY_BENCHMARKS`: pre-aggregated percentile table for the Streamlit salary widget.
-- `DEVPULSE_SEARCH`: Cortex Search service indexed on composite profile text.
+```mermaid
+flowchart TD
+    subgraph INGESTION
+        CSV[survey_results_public.csv<br/>65,437 rows] --> STAGE[RAW_STAGE<br/>+ SURVEY_CSV_FORMAT]
+        PIPE[SURVEY_PIPE<br/>AUTO_INGEST = FALSE<br/>defined, not triggered]
+    end
+    subgraph RAW
+        RAWT[RAW_SURVEY_RESPONSES<br/>114 VARCHAR cols + 2 metadata]
+    end
+    subgraph CLEAN
+        DTC[DT_CLEAN_RESPONSES<br/>Dynamic Table]
+    end
+    subgraph ANALYTICS
+        DTA[DT_ANALYTICS_DEVELOPERS<br/>Dynamic Table]
+        V1[V_SALARY_BY_COUNTRY]
+        V2[V_AI_ADOPTION_BY_ROLE]
+        V3[V_LANGUAGE_DEMAND]
+    end
+    subgraph ENRICHED
+        ENR[ENRICHED_RESPONSES<br/>table + Cortex LLM columns]
+        TRAIN[V_SALARY_TRAINING_INPUT] --> MODEL[SALARY_FORECAST_MODEL]
+        MODEL --> FRES[SALARY_FORECAST_RESULTS]
+        BENCH[SALARY_BENCHMARKS]
+        AVF[V_SALARY_ACTUAL_VS_FORECAST]
+        PROF[V_SEARCH_PROFILES] --> SRCH[DEVPULSE_SEARCH]
+    end
+    STAGE -->|COPY INTO, 02_raw_load.sql| RAWT
+    RAWT --> DTC --> DTA
+    DTA --> V1 & V2 & V3
+    DTA -->|INSERT seed| ENR
+    DTC -->|AI_SENTIMENT_RAW for AI attitude| ENR
+    ENR --> TRAIN & BENCH & PROF
+    TRAIN & FRES --> AVF
+    ENR & FRES & BENCH & SRCH & V3 --> APP[Streamlit app<br/>DEVPULSE_APP_WH]
+```
 
 ---
 
 ## 3. Object Inventory
 
-### 3.1 Database
-| Name | Purpose |
+### Database and schemas (`01_staging.sql`)
+
+| Object | Purpose |
 |---|---|
-| `DEVPULSEINTEL` | Single database for all project objects |
+| `DEVPULSEINTEL` | Project database |
+| `INGESTION` | Stage, file format, pipe |
+| `RAW` | Source data as-is |
+| `CLEAN` | Typed, renamed, null-handled data |
+| `ANALYTICS` | Business logic and reporting views |
+| `ENRICHED` | Cortex LLM/ML/Search outputs |
 
-### 3.2 Schemas
-| Name | Layer | Purpose |
-|---|---|---|
-| `INGESTION` | Ingestion | Stage, file format, Snowpipe |
-| `RAW` | Layer 1 | Raw survey table |
-| `CLEAN` | Layer 2 | Typed Dynamic Table |
-| `ANALYTICS` | Layer 3 | Business logic Dynamic Table + supporting views |
-| `ENRICHED` | Layer 4 | Cortex outputs, ML results, Search service, Streamlit app |
+### Warehouses (`01_staging.sql`)
 
-### 3.3 Warehouses
-| Name | Size | Auto-Suspend | Used For |
-|---|---|---|---|
-| `DEVPULSE_LOAD_WH` | XSMALL | 60s | COPY INTO loads |
-| `DEVPULSE_TRANSFORM_WH` | XSMALL | 60s | Dynamic Table manual refresh |
-| `DEVPULSE_CORTEX_WH` | XSMALL | 60s | Cortex LLM/ML enrichment (run once) |
-| `DEVPULSE_APP_WH` | XSMALL | 60s | Streamlit app sessions |
+All XS, `AUTO_SUSPEND = 60`, `AUTO_RESUME = TRUE`. They are split by workload so costs can be attributed.
 
-### 3.4 Stage and File Format
-| Name | Type | Purpose |
-|---|---|---|
-| `INGESTION.RAW_STAGE` | Internal Named Stage | Holds the survey CSV before loading |
-| `INGESTION.SURVEY_CSV_FORMAT` | File Format | CSV with quoted fields, null handling, UTF-8 |
-
-### 3.5 Snowpipe
-| Name | Source | Target | Notes |
-|---|---|---|---|
-| `INGESTION.SURVEY_PIPE` | `@RAW_STAGE` | `RAW.RAW_SURVEY_RESPONSES` | `AUTO_INGEST = FALSE` — configured for pattern demonstration; inactive post-load |
-
-### 3.6 Tables
-| Schema | Table | Type | Rows | Purpose |
-|---|---|---|---|---|
-| `RAW` | `RAW_SURVEY_RESPONSES` | Standard Table | ~65K | COPY INTO target; 114 columns all VARCHAR |
-| `ENRICHED` | `ENRICHED_RESPONSES` | Standard Table | ~6.5K (sample) | Cortex LLM outputs materialized on 10% sample |
-| `ENRICHED` | `SALARY_FORECAST_RESULTS` | Standard Table | Variable | Cortex ML FORECAST predictions per country |
-| `ENRICHED` | `SALARY_BENCHMARKS` | Standard Table | Variable | Pre-aggregated salary percentiles |
-
-### 3.7 Dynamic Tables
-| Schema | Name | Source | Lag | Purpose |
-|---|---|---|---|---|
-| `CLEAN` | `DT_CLEAN_RESPONSES` | `RAW.RAW_SURVEY_RESPONSES` | `9999 days` | Typed and aliased; no business logic |
-| `ANALYTICS` | `DT_ANALYTICS_DEVELOPERS` | `CLEAN.DT_CLEAN_RESPONSES` | `9999 days` | Professional devs only; derived columns |
-
-### 3.8 Views
-| Schema | Name | Purpose |
-|---|---|---|
-| `ANALYTICS` | `V_SALARY_BY_COUNTRY` | Median/avg salary aggregated by country |
-| `ANALYTICS` | `V_AI_ADOPTION_BY_ROLE` | AI adoption rate by developer role |
-| `ANALYTICS` | `V_LANGUAGE_DEMAND` | Language usage count by country (LATERAL FLATTEN) |
-| `ENRICHED` | `V_SALARY_TRAINING_INPUT` | Training data for ML FORECAST (median salary by experience × country) |
-| `ENRICHED` | `V_SALARY_ACTUAL_VS_FORECAST` | Actuals + forecast combined for Streamlit chart |
-| `ENRICHED` | `V_SEARCH_PROFILES` | Composite profile text for Cortex Search indexing |
-
-### 3.9 Cortex Objects
-| Type | Name | Method | Input | Output | Scope |
-|---|---|---|---|---|---|
-| LLM Function | Sentiment scoring | `CORTEX.SENTIMENT()` | `JOB_SAT` text | Float score −1 to 1 | 10% sample |
-| LLM Function | Skill clustering | `CORTEX.COMPLETE()` | `LANGUAGE_HAVE_WORKED_WITH` | Skill cluster label | 10% sample |
-| LLM Function | Role standardization | `CORTEX.CLASSIFY_TEXT()` | `DEV_TYPE` | Standardized role category | 10% sample |
-| LLM Function | AI attitude | `CORTEX.CLASSIFY_TEXT()` | `AI_SENTIMENT_RAW` | Enthusiast / Cautious / Skeptic / Neutral | 10% sample |
-| ML Model | `SALARY_FORECAST_MODEL` | `SNOWFLAKE.ML.FORECAST` | Experience × country median salary | Predicted salary | Full dataset |
-| Search Service | `DEVPULSE_SEARCH` | Cortex Search | `V_SEARCH_PROFILES.PROFILE_TEXT` | Semantic search results | 10% sample |
-
-### 3.10 Streamlit App
-| Name | Warehouse | Schema | Views |
-|---|---|---|---|
-| `DEVPULSEINTEL_APP` | `DEVPULSE_APP_WH` | `ENRICHED` | Salary Explorer, AI Adoption, Skill Demand, Semantic Search |
-
----
-
-## 4. Column Naming Convention
-
-| Layer | Convention | Example |
-|---|---|---|
-| RAW | Matches CSV header exactly (uppercased, spaces removed) | `YEARSCODEPRO`, `CONVERTEDCOMPYEARLY` |
-| CLEAN | Readable snake_case, typed | `YEARS_CODE_PRO_INT`, `ANNUAL_COMP_USD` |
-| ANALYTICS | Inherits CLEAN names; adds derived columns | `SALARY_BAND`, `EXPERIENCE_BUCKET`, `USES_AI_TOOLS` |
-| ENRICHED | Inherits ANALYTICS passthrough names; adds Cortex columns | `SKILL_CLUSTER`, `STANDARDIZED_ROLE`, `JOB_SAT_SENTIMENT_SCORE` |
-
-**Key rule:** Only `DT_CLEAN_RESPONSES` references RAW column names. All other objects reference CLEAN or ANALYTICS column names. This isolates the source schema from the rest of the pipeline.
-
----
-
-## 5. Cortex FORECAST Design Note
-
-`SNOWFLAKE.ML.FORECAST` requires a TIMESTAMP column as the time axis. Salary data has no natural time dimension — prediction is by years of professional experience.
-
-**Solution:** `YEARS_CODE_PRO_INT` is encoded as a pseudo-timestamp using a fixed epoch:
-```sql
-DATEADD('day', YEARS_CODE_PRO_INT, '2000-01-01'::DATE)::TIMESTAMP_NTZ
-```
-Experience = 0 → `2000-01-01`, Experience = 10 → `2000-01-11`. Each country is a separate series. To decode back to years of experience from the stored dates, use `DATEDIFF`:
-```sql
-DATEDIFF('day', '2000-01-01'::DATE, EXPERIENCE_DATE::DATE) AS YEARS_EXPERIENCE
-```
-
----
-
-## 6. Object Status Verification
-
-The correct commands to check status of each Snowflake-native object type:
-
-```sql
--- Standard objects
-SHOW TABLES          IN SCHEMA DEVPULSEINTEL.RAW;
-SHOW PIPES           IN SCHEMA DEVPULSEINTEL.INGESTION;
-SHOW STAGES          IN SCHEMA DEVPULSEINTEL.INGESTION;
-
--- Dynamic Tables (check TARGET_LAG column)
-SHOW DYNAMIC TABLES  IN DATABASE DEVPULSEINTEL;
-
--- Cortex ML model
-SHOW SNOWFLAKE.ML.FORECAST IN SCHEMA DEVPULSEINTEL.ENRICHED;
-
--- Cortex Search (check STATUS column — wait for ACTIVE)
-SHOW CORTEX SEARCH SERVICES IN SCHEMA DEVPULSEINTEL.ENRICHED;
-
--- Streamlit app
-SHOW STREAMLITS      IN SCHEMA DEVPULSEINTEL.ENRICHED;
-
--- Column structure of any table
-DESCRIBE TABLE DEVPULSEINTEL.RAW.RAW_SURVEY_RESPONSES;
-```
-
-> **Note:** Cortex Search and Cortex ML objects are managed with `SHOW` commands, not through `INFORMATION_SCHEMA`. `INFORMATION_SCHEMA` covers standard SQL objects (tables, views, columns, stages). For newer Snowflake-native AI features, always use `SHOW`.
-
----
-
-## 7. Credit Cost Estimates
-
-### Design Assumption: 10% Sampling for Cortex LLM
-
-**All Cortex LLM enrichment functions are applied to a 10% random sample** of professional developers (~6,500 rows) from `ANALYTICS.DT_ANALYTICS_DEVELOPERS`. This is a deliberate cost-efficiency tradeoff:
-
-- **Full-dataset enrichment (65,000 rows):** ~$70–$88 in AI_SERVICES credits
-- **Sampled enrichment (6,500 rows, 10%):** ~$7–$10 in AI_SERVICES credits
-- **Benefit:** Produces meaningful aggregations in all Streamlit views while reducing cost by 90%
-
-The sample is applied in `04_cortex_enrich.sql` Section 2:
-```sql
-INSERT INTO ENRICHED.ENRICHED_RESPONSES
-SELECT * FROM ANALYTICS.DT_ANALYTICS_DEVELOPERS
-SAMPLE (10 PERCENT);  ← Sampling reduces Cortex LLM cost
-```
-
-See **setup.md → Step 5** and **README.md → Cost Profile** for full context.
-
----
-
-### Estimated Cost Breakdown (with 10% sampling)
-
-| Operation | Rows | Estimated Credits | Frequency | Notes |
-|---|---|---|---|---|
-| COPY INTO raw load | 65K | < 0.1 | Once | Initial load |
-| Dynamic Table refresh (CLEAN) | 65K | < 0.05 | Once | One-time manual refresh |
-| Dynamic Table refresh (ANALYTICS) | ~50K | < 0.05 | Once | One-time manual refresh |
-| Cortex SENTIMENT | 6.5K | ~0.03 | Once | 10% sample |
-| Cortex CLASSIFY_TEXT (roles) | 6.5K | ~0.03 | Once | 10% sample |
-| Cortex COMPLETE (skill clusters) | 6.5K | ~0.05 | Once | 10% sample, longest running |
-| Cortex CLASSIFY_TEXT (AI attitude) | 6.5K | ~0.03 | Once | 10% sample |
-| Cortex ML FORECAST training | 50K | ~0.5 | Once | Full dataset aggregation |
-| Cortex Search service creation | 6.5K | ~0.2 | Once | 10% sample indexing |
-| Streamlit app sessions | — | ~0.5 | Ongoing | Demo use, minimal |
-| **Subtotal — Warehouse Compute** | | **~1–2** | | |
-| **AI_SERVICES (Cortex LLM tokens)** | | **~7–10** | | |
-| **Total estimate (sampled)** | | **~8–12 credits (~$3–$5 USD)** | | |
-
----
-
-### What If Full-Dataset Enrichment Is Applied?
-
-If the `SAMPLE(10 PERCENT)` clause is omitted from `04_cortex_enrich.sql` Section 2:
-
-| Operation | Rows | Estimated Credits | Notes |
-|---|---|---|---|
-| Cortex SENTIMENT | 65K | ~0.3 | Full dataset |
-| Cortex CLASSIFY_TEXT (roles) | 65K | ~0.3 | Full dataset |
-| Cortex COMPLETE (skill clusters) | 65K | ~0.5 | Full dataset, longest running |
-| Cortex CLASSIFY_TEXT (AI attitude) | 65K | ~0.3 | Full dataset |
-| **AI_SERVICES subtotal** | | **~$70–$88** | **17x cost of sampled approach** |
-| **Total project cost** | | **~$75–$90** | |
-
-This is **not an error** — it's the real cost of full-dataset Cortex LLM enrichment at scale. See **README.md → Cost Retrospective** for the detailed analysis of why the original BRD underestimated this cost.
-
----
-
-### Warehouse Compute Estimates (both scenarios)
-
-Warehouse compute is identical regardless of sampling (same ingestion, same Dynamic Table refresh, same ML training on aggregates):
-
-| Component | Estimated Credits |
+| Warehouse | Used by |
 |---|---|
-| Ingestion (LOAD_WH) | < 0.5 |
-| Transformation (TRANSFORM_WH) | < 0.5 |
-| ML Training (CORTEX_WH) | < 0.5 |
-| App Sessions (APP_WH) | < 1.0 |
-| **Total warehouse** | **~$2–3** |
+| `DEVPULSE_LOAD_WH` | `COPY INTO` (script 02) |
+| `DEVPULSE_TRANSFORM_WH` | Dynamic Table refreshes (script 03) |
+| `DEVPULSE_CORTEX_WH` | Cortex enrichment, FORECAST training, Cortex Search indexing (scripts 04–06) |
+| `DEVPULSE_APP_WH` | Streamlit app queries |
+
+### Ingestion (`01_staging.sql`, `02_raw_load.sql`)
+
+| Object | Type | Notes |
+|---|---|---|
+| `INGESTION.SURVEY_CSV_FORMAT` | File format | `SKIP_HEADER = 1`, optional `"` enclosure, `NULL_IF = ('NA','NULL','','N/A')` |
+| `INGESTION.RAW_STAGE` | Internal stage | CSV is uploaded here manually |
+| `INGESTION.SURVEY_PIPE` | Pipe | `AUTO_INGEST = FALSE`; same `COPY` definition as script 02; never triggered |
+| `RAW.RAW_SURVEY_RESPONSES` | Table | 114 survey columns (VARCHAR) + `_SOURCE_FILE_NAME`, `_LOAD_TIMESTAMP`. CSV column "Check" is renamed `CHECK_COL` |
+
+The load is `COPY INTO` with positional `$1–$114` mapping, `ON_ERROR = 'CONTINUE'`, `PURGE = FALSE`, and `FORCE = FALSE`.
+
+### Transformation (`03_dynamic_tables.sql`)
+
+| Object | Type | Logic |
+|---|---|---|
+| `CLEAN.DT_CLEAN_RESPONSES` | Dynamic Table, lag 9999 days | Renames to snake_case; `COUNTRY` trimmed and uppercased; experience text → integer ("Less than 1 year" → 0, "More than 50 years" → 51); salary from `ConvertedCompYearly`, with values under $100 or over $2M set to NULL; `WHERE RESPONSEID IS NOT NULL` |
+| `ANALYTICS.DT_ANALYTICS_DEVELOPERS` | Dynamic Table, lag 9999 days | Filter: `MAIN_BRANCH LIKE '%developer%'` and `DEV_TYPE NOT LIKE '%student%'`. Derives `SALARY_BAND` (6 bands), `EXPERIENCE_BUCKET` (6 buckets) with sort keys, `PRIMARY_LANGUAGE` and `PRIMARY_DEV_ROLE` (first value of the semicolon list), `USES_AI_TOOLS`, `JOB_SAT_SCORE` |
+| `ANALYTICS.V_SALARY_BY_COUNTRY` | View | Median/avg/P25/P75 salary per country (≥30 respondents) |
+| `ANALYTICS.V_AI_ADOPTION_BY_ROLE` | View | AI adoption rate by primary role (≥20 respondents) |
+| `ANALYTICS.V_LANGUAGE_DEMAND` | View | Language usage count by country (`LATERAL FLATTEN` on the language list). Used by the Skill Demand page |
+
+### Enrichment (`04_cortex_enrich.sql`)
+
+`ENRICHED.ENRICHED_RESPONSES` is a regular table. It is seeded with 23 passthrough columns from ANALYTICS, then filled by one `UPDATE` per Cortex task.
+
+| Output column(s) | Function | Input | Output space |
+|---|---|---|---|
+| `JOB_SAT_SENTIMENT_SCORE`, `JOB_SAT_SENTIMENT_LABEL` | `SENTIMENT` | `JOB_SAT` | Score −1 to 1; label Positive (>0.2) / Neutral / Negative (<−0.2). **Input is numeric in the 2024 survey, so the output is not meaningful** |
+| `STANDARDIZED_ROLE`, `STANDARDIZED_ROLE_SCORE` | `CLASSIFY_TEXT` | `DEV_TYPE` | Backend, Frontend, Full-Stack, Data Engineer / Analyst, DevOps / Platform, Mobile, Engineering Manager / Lead, Other Technical |
+| `SKILL_CLUSTER`, `SKILL_CLUSTER_RAW` | `COMPLETE` (`mistral-7b`) | `LANGUAGE_HAVE_WORKED_WITH` | Web & JavaScript, Data & Python, Systems & Low-Level, Cloud & DevOps, Mobile & Cross-Platform, Enterprise & JVM, Full-Stack Generalist, Other. Non-conforming responses are mapped to Other |
+| `AI_ATTITUDE_CATEGORY` | `CLASSIFY_TEXT` | `CLEAN.AI_SENTIMENT_RAW` | Enthusiast, Cautious, Skeptic, Neutral |
+
+As written, the script calls `SENTIMENT` three times per row and `CLASSIFY_TEXT` (roles) and `COMPLETE` twice per row (README Known Issue 1). Enrichment ran on all ANALYTICS rows, unsampled.
+
+### Machine learning (`05_cortex_ml.sql`)
+
+| Object | Type | Notes |
+|---|---|---|
+| `ENRICHED.V_SALARY_TRAINING_INPUT` | View | Median salary per (country, years of experience); the timestamp is `2000-01-01 + N days`; cells need ≥5 respondents |
+| `ENRICHED.SALARY_FORECAST_MODEL` | `SNOWFLAKE.ML.FORECAST` | Series = country; `ON_ERROR = 'SKIP'` for series with too little data |
+| `ENRICHED.SALARY_FORECAST_RESULTS` | Table | 10 forecast periods per country, 80% prediction interval. Filled via `RESULT_SCAN(LAST_QUERY_ID())` |
+| `ENRICHED.SALARY_BENCHMARKS` | Table | P25/median/avg/P75/P90 by country × experience bucket × `PRIMARY_DEV_ROLE` (≥10 respondents) |
+| `ENRICHED.V_SALARY_ACTUAL_VS_FORECAST` | View | Training actuals UNION forecast. Not read by the app, which computes actuals itself |
+
+### Search (`06_cortex_search.sql`)
+
+| Object | Type | Notes |
+|---|---|---|
+| `ENRICHED.V_SEARCH_PROFILES` | View | Builds `PROFILE_TEXT` from role, cluster, languages, databases, platforms, country, experience, salary band, JobSat, and AI attitude. Only rows with non-null `SKILL_CLUSTER` |
+| `ENRICHED.DEVPULSE_SEARCH` | Cortex Search service | `ON PROFILE_TEXT`; filter attributes: `COUNTRY`, `PRIMARY_DEV_ROLE`, `STANDARDIZED_ROLE`, `SKILL_CLUSTER`, `EXPERIENCE_BUCKET`, `SALARY_BAND`, `JOB_SAT_SENTIMENT_LABEL`, `AI_ATTITUDE_CATEGORY`, `USES_AI_TOOLS`. `TARGET_LAG = '9999 days'` |
+
+### Application (`streamlit/app.py`)
+
+Deployed in `DEVPULSEINTEL.ENRICHED` on `DEVPULSE_APP_WH`. Query results are cached for one hour (`st.cache_data(ttl=3600)`).
+
+| Page | Reads from |
+|---|---|
+| Salary Explorer | `ENRICHED_RESPONSES` (KPIs, experience and band charts, forecast actuals), `SALARY_FORECAST_RESULTS`, `SALARY_BENCHMARKS` |
+| AI Adoption | `ENRICHED_RESPONSES` (adoption by `STANDARDIZED_ROLE`, `AI_ATTITUDE_CATEGORY`, `AI_THREAT_JOB`, sentiment by role) |
+| Skill Demand | `ENRICHED_RESPONSES` (`SKILL_CLUSTER`), `ANALYTICS.V_LANGUAGE_DEMAND` |
+| Semantic Search | `DEVPULSE_SEARCH` via `SNOWFLAKE.CORTEX.SEARCH_PREVIEW` |
 
 ---
 
-## 8. Design Decisions
+## 4. Row Counts
 
-### Why Dynamic Tables over Tasks + Stored Procedures?
-Dynamic Tables are Snowflake's declarative transformation primitive. You define the output, not the execution plan. This is the current Snowflake-recommended pattern. Tasks + stored procedures solve the same problem imperatively and require significantly more code.
+| Layer | Count | Source |
+|---|---|---|
+| Source CSV | 65,437 | Local pandas profile |
+| RAW / CLEAN (expected) | 65,437 | Source file check: every record has 114 fields, no embedded newlines |
+| ANALYTICS / ENRICHED | ~51.5K (51,525) | ANALYTICS filter applied to the source CSV in pandas |
+| … of which have a valid salary | ~23.1K (23,094) | The figure shown on the app's "Developers" KPI card with no filters |
 
-### Why materialize Cortex outputs instead of querying live?
-Every Cortex LLM function call consumes credits and adds latency. Materializing once makes the app fast, cost fixed, and results reproducible. The Streamlit app reads static columns — no tokens consumed at query time.
-
-### Why `TARGET_LAG = '9999 days'`?
-The dataset is static. Auto-refresh serves no purpose and would consume credits on a schedule. Setting lag to 9999 days effectively disables auto-refresh while keeping Dynamic Tables as the declared mechanism (correct for portfolio demonstration). Tables are manually refreshed once after creation with `ALTER DYNAMIC TABLE ... REFRESH`.
-
-### Why one database with multiple schemas?
-Simpler object references, simpler for a portfolio project. A production system might separate RAW and ANALYTICS into separate databases for governance — documented as a known simplification.
-
-### Why XSMALL warehouses everywhere?
-This dataset (65K rows, 114 columns) fits comfortably in XSMALL compute. No warehouse needs to be larger. Cost minimization is explicit in the NFRs.
-
-### Why apply Cortex LLM to only 10% of data?
-Cortex LLM functions bill per token, making full-dataset enrichment prohibitively expensive for portfolio projects ($70–$88 vs. $7–$10). A 10% stratified sample (~6,500 rows) demonstrates full capability, produces meaningful analytical results, and keeps costs practical. This is a deliberate engineering tradeoff documented in **BRD.md Section 9 (revised)** and **README.md → Cost Profile**.
+Build-time counts were not retained, so these are estimates from the source file.
 
 ---
 
-*DevPulseIntel · Stack Overflow Developer Survey 2024 · Built on Snowflake Trial*
+## 5. Cost Architecture
+
+| Cost source | Control | Outcome |
+|---|---|---|
+| Warehouse compute | XS size, 60s auto-suspend, one warehouse per workload | Small share of total |
+| Dynamic Table refresh | 9999-day lag, one manual refresh | One-time |
+| Cortex LLM (AI_SERVICES) | **None applied in the build** | ~$70 of ~$88 total trial credits |
+| FORECAST training | Single run | One-time |
+| Cortex Search | 9999-day lag | Indexed once; serving cost per query |
+
+The missing control on Cortex LLM spend is analyzed in `README.md` → Cost Retrospective and `decisions.md` D-12.

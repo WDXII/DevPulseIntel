@@ -1,6 +1,9 @@
 # DevPulseIntel
 
-A fully Snowflake-native analytics platform built on the Stack Overflow Developer Survey 2024 dataset (~65,000 respondents). DevPulseIntel demonstrates end-to-end data engineering and AI/ML capabilities using exclusively Snowflake-native services — no external orchestrators, no external storage, no local compute.
+A **Snowflake Cortex capabilities demo** built on the Stack Overflow Developer Survey 2024 (65,437 respondents). Every layer runs on Snowflake-native services: no external orchestrator, storage, or compute. The repo also includes a documented post-build review.
+
+> **Status:** Complete. Built in May 2026 on a Snowflake trial account that has since expired.
+> The SQL and app code in this repo are **what ran**, with one exception: `app.py` predates a small NaN-handling fix made in the deployed app (see Known Issue 8). Issues found after the build are documented in [Known Issues & Post-Build Review](#known-issues--post-build-review) rather than patched, because patched code that was never executed would no longer match the results and screenshots.
 
 ---
 
@@ -8,38 +11,51 @@ A fully Snowflake-native analytics platform built on the Stack Overflow Develope
 
 | Snowflake Capability | Implementation |
 |---|---|
-| **Snowpipe** | Auto-ingest from internal stage into `RAW.RAW_SURVEY_RESPONSES` |
-| **Dynamic Tables** | Medallion architecture — RAW → CLEAN → ANALYTICS, declarative refresh |
-| **Cortex LLM** | SENTIMENT on job satisfaction text, COMPLETE for role standardization, CLASSIFY_TEXT for skill clustering |
-| **Cortex ML** | FORECAST model using years of experience as a pseudo-time predictor axis |
-| **Cortex Search** | Semantic retrieval service over enriched developer profiles |
-| **Streamlit in Snowflake** | Four-view analytics application, natively deployed, zero external hosting |
+| **Internal stage + pipe** | `RAW_STAGE` with a CSV file format. `SURVEY_PIPE` is defined (`AUTO_INGEST = FALSE`); the load ran via manual `COPY INTO` |
+| **Dynamic Tables** | Medallion layers RAW → CLEAN → ANALYTICS, `TARGET_LAG = '9999 days'`, refreshed manually once |
+| **Cortex LLM** | `SENTIMENT` on job satisfaction · `CLASSIFY_TEXT` for role standardization and AI attitude · `COMPLETE` (`mistral-7b`) for skill clustering |
+| **Cortex ML** | `FORECAST` using years of experience as a pseudo-time axis (a capability demo, not a salary model; see Known Issues) |
+| **Cortex Search** | `DEVPULSE_SEARCH` service over a composite developer-profile text column |
+| **Streamlit in Snowflake** | Four-page app running on `DEVPULSE_APP_WH` |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    CSV[survey_results_public.csv] --> STAGE[INGESTION.RAW_STAGE]
+    STAGE -->|COPY INTO| RAW[RAW.RAW_SURVEY_RESPONSES]
+    RAW -->|Dynamic Table| CLEAN[CLEAN.DT_CLEAN_RESPONSES]
+    CLEAN -->|Dynamic Table| ANALYTICS[ANALYTICS.DT_ANALYTICS_DEVELOPERS]
+    ANALYTICS -->|INSERT + Cortex UPDATEs| ENRICHED[ENRICHED.ENRICHED_RESPONSES]
+    ENRICHED --> ML[SALARY_FORECAST_MODEL<br/>+ SALARY_BENCHMARKS]
+    ENRICHED --> SEARCH[DEVPULSE_SEARCH]
+    ENRICHED --> APP[Streamlit app]
+    ML --> APP
+    SEARCH --> APP
+```
+
+Full object inventory: [`architecture.md`](./architecture.md). Design rationale: [`decisions.md`](./decisions.md).
 
 ---
 
 ## The Four Views
 
-### 1. Salary Explorer
-Filter by country, developer role, years of experience, and technology stack. Compare salary distributions and see Cortex ML-predicted salary benchmarks.
-
-### 2. AI Adoption Dashboard
-Visualize AI tool adoption rates across developer roles and regions. See which tools are most used, which are most wanted, and sentiment toward AI as a job threat.
-
-### 3. Skill Demand Analyzer
-Explore Cortex-classified skill clusters. See which combinations of languages and frameworks form the most common talent profiles globally and in specific markets.
-
-### 4. Semantic Search
-Ask natural language questions about developer profiles using Cortex Search. Results are ranked by semantic similarity, not keyword match.
+1. **Salary Explorer.** Filter by country and standardized role. Shows KPI cards, median salary by experience bucket, salary band distribution, the Cortex ML forecast chart, and a "Where Do I Stand?" percentile widget.
+2. **AI Adoption Dashboard.** AI tool adoption rate by standardized role, AI attitude distribution (Cortex `CLASSIFY_TEXT`), AI job-threat perception, and job-satisfaction sentiment by role.
+3. **Skill Demand Analyzer.** Median salary by skill cluster (Cortex `COMPLETE`), top 20 languages globally or by country, and skill cluster sizes.
+4. **Semantic Search.** Natural-language search over developer profiles via Cortex Search, with country, skill-cluster, and AI-usage filters.
 
 ---
 
 ## Screenshots
 
-### Salary Explorer — Experience & Distribution
-![Median salary by years of experience and developer distribution across salary bands](https://github.com/WDXII/DevPulseIntel/blob/main/screenshots/01_salary_explorer_experience_and_bands.png)
+### Salary Explorer: Experience & Distribution
+![Median salary by years of experience and developer distribution across salary bands](screenshots/01_salary_explorer_experience_and_bands.png)
 
-### Cortex ML — Salary Forecast
-![Cortex ML FORECAST showing actual vs predicted developer salaries with 80% prediction intervals](https://github.com/WDXII/DevPulseIntel/blob/main/screenshots/02_cortex_ml_salary_forecast.png)
+### Cortex ML: Salary Forecast
+![Cortex ML FORECAST showing actual vs predicted developer salaries with 80% prediction intervals](screenshots/02_cortex_ml_salary_forecast.png)
 
 ---
 
@@ -47,21 +63,27 @@ Ask natural language questions about developer profiles using Cortex Search. Res
 
 ```
 DevPulseIntel/
-├── BRD.md                    # Business Requirements Document
-├── architecture.md           # Full architecture with object inventory
-├── setup.md                  # Step-by-step environment setup guide
 ├── README.md                 # This file
+├── BRD.md                    # Business requirements + post-build success review
+├── architecture.md           # Object inventory, data flow, layer design
+├── decisions.md              # Design decisions with post-build hindsight
+├── setup.md                  # Step-by-step rebuild guide
+├── DEVLOG.md                 # Build log: errors, fixes, lessons
 │
 ├── sql/
-│   ├── 01_staging.sql        # Stage and Snowpipe configuration
-│   ├── 02_raw_load.sql       # COPY INTO raw table
-│   ├── 03_dynamic_tables.sql # CLEAN and ANALYTICS Dynamic Tables
-│   ├── 04_cortex_enrich.sql  # SENTIMENT, COMPLETE, CLASSIFY_TEXT enrichment
-│   ├── 05_cortex_ml.sql      # Cortex ML FORECAST model
+│   ├── 01_staging.sql        # Database, schemas, warehouses, stage, RAW table, pipe
+│   ├── 02_raw_load.sql       # COPY INTO the RAW table
+│   ├── 03_dynamic_tables.sql # CLEAN and ANALYTICS Dynamic Tables + views
+│   ├── 04_cortex_enrich.sql  # SENTIMENT, CLASSIFY_TEXT, COMPLETE enrichment
+│   ├── 05_cortex_ml.sql      # FORECAST model, forecast results, salary benchmarks
 │   └── 06_cortex_search.sql  # Cortex Search service
 │
 ├── streamlit/
 │   └── app.py                # Streamlit in Snowflake application
+│
+├── profiling/                # Post-build checks, run locally against the source CSV
+│   ├── check_jobsat.py       # JobSat value distribution + estimated sentiment coverage
+│   └── check_rowcount.py     # File integrity + which row definition matches ~23K
 │
 └── screenshots/
     ├── 01_salary_explorer_experience_and_bands.png
@@ -72,51 +94,103 @@ DevPulseIntel/
 
 ## Quick Start
 
-1. **Download data** — https://survey.stackoverflow.co/ → 2024 full data
-2. **Follow** [`setup.md`](./setup.md) — complete step-by-step instructions
-3. **Run SQL scripts** in order from `01_staging.sql` to `06_cortex_search.sql`
-4. **Deploy** `streamlit/app.py` as a Streamlit in Snowflake app
+1. Download the 2024 survey from https://survey.stackoverflow.co/ and extract `survey_results_public.csv`.
+2. Follow [`setup.md`](./setup.md). It covers sampling and input profiling, which the original build skipped.
+3. Run the SQL scripts in order, `01` through `06`.
+4. Deploy `streamlit/app.py` as a Streamlit in Snowflake app.
 
-Full setup takes approximately 2 hours end-to-end.
+Plan for roughly 2 hours end to end.
+
+The scripts in `profiling/` need only Python and pandas. Put `survey_results_public.csv` in `data/` (it is not committed; it exceeds GitHub's file size limit), then run `python profiling/check_jobsat.py` from the repo root. To use a CSV elsewhere, pass its path as an argument.
 
 ---
 
 ## Cost Profile
 
-This project is designed for **one-time load with zero ongoing compute cost.**
+The project is designed for a **one-time build with no ongoing compute**.
 
-| Component | Approach | Cost Driver |
+| Component | Approach | Cost driver |
 |---|---|---|
-| Warehouse compute | XS warehouse, auto-suspend 60s | One-time build only |
+| Warehouses | Four XS warehouses, 60s auto-suspend, split by workload | One-time build |
 | Dynamic Tables | `TARGET_LAG = '9999 days'` | No scheduled refresh |
-| Cortex LLM | Applied to sampled subset (≤10% of rows) | Token cost, not compute |
-| Cortex ML FORECAST | Single model training run | One-time |
-| Cortex Search | Indexed once at creation | Storage-based |
-| Streamlit app | Serverless, no warehouse | Per-session only |
+| Cortex LLM | Per-row function calls | Tokens × calls per row × rows |
+| Cortex ML FORECAST | Single training run | One-time |
+| Cortex Search | Indexed once (`TARGET_LAG = '9999 days'`) | Indexing + serving |
+| Streamlit app | Runs on `DEVPULSE_APP_WH` | Per session, while the warehouse is running |
 
 ### Cost Retrospective
 
-The original BRD success criterion specified **total spend under $5**. The actual spend was approximately **$88** — 17x over target. This was a design flaw, not an execution failure.
+The original target was under $5. The build consumed **~$88 of trial credits**, of which ~$70 was AI_SERVICES (Cortex LLM). Post-build review found two root causes and one related data issue:
 
-**Root cause:** `COMPLETE` and `CLASSIFY_TEXT` bill per token. Running both across 65,000 respondents without sampling was never compatible with a $5 budget. `AI_SERVICES` alone cost ~$70.
+1. **No sampling.** Enrichment ran on every row in the ANALYTICS layer (~51.5K rows, estimated from the source CSV).
+2. **Redundant calls.** `04_cortex_enrich.sql` calls `SENTIMENT` three times per row and `CLASSIFY_TEXT` / `COMPLETE` twice per row. It makes one call per derived column instead of one call per row.
+3. **Spend on an unprofiled column.** `SENTIMENT` was applied to JobSat, which is a 0–10 integer in the 2024 survey (see Known Issues).
 
-**What should have been in the design from the start:**
+**What a rebuild would do (not executed; the trial expired):**
+- Profile every enrichment input before calling any Cortex function (`SELECT DISTINCT ... LIMIT 20`).
+- Run each Cortex step on 100 rows first, then extrapolate the cost before scaling.
+- Apply sampling to the Cortex steps only, not to the seed table, so ML and benchmark tables keep full data (see `decisions.md` D-12).
+- Call each Cortex function once per row and derive labels from the stored result.
+
+Estimated AI_SERVICES cost for that rebuild: roughly **$3–4**. This is extrapolated from actuals and unverified.
+
+**The lesson:** LLM cost scales with rows × calls per row × tokens per call. Warehouse size has nothing to do with it. Measure a small batch before you scale.
+
+---
+
+## Known Issues & Post-Build Review
+
+The SQL in this repo is exactly what was executed. The trial account has since expired, so the issues below are documented rather than re-run. Items marked *(code review)* were found by reading the code and could not be confirmed against the live app.
+
+**1. Redundant Cortex calls (cost).** See the Cost Retrospective. Corrected pattern, not executed:
 
 ```sql
--- Sample before enrichment — demonstrate capability on a representative subset
-INSERT INTO ENRICHED.ENRICHED_RESPONSES
-SELECT
-    RESPONSE_ID,
-    SNOWFLAKE.CORTEX.SENTIMENT(JOB_SATISFACTION)      AS JOB_SAT_SENTIMENT_SCORE,
-    SNOWFLAKE.CORTEX.COMPLETE('mistral-7b', ...)       AS STANDARDIZED_ROLE,
-    SNOWFLAKE.CORTEX.CLASSIFY_TEXT(LANGUAGE_WORKED, ...) AS SKILL_CLUSTER
-FROM ANALYTICS.DT_ANALYTICS_DEVELOPERS
-    SAMPLE (10 PERCENT);   -- ← This line prevents the $70 bill
+UPDATE DEVPULSEINTEL.ENRICHED.ENRICHED_RESPONSES
+SET JOB_SAT_SENTIMENT_SCORE = SNOWFLAKE.CORTEX.SENTIMENT(JOB_SAT)
+WHERE JOB_SAT IS NOT NULL;
+
+UPDATE DEVPULSEINTEL.ENRICHED.ENRICHED_RESPONSES
+SET JOB_SAT_SENTIMENT_LABEL = CASE
+    WHEN JOB_SAT_SENTIMENT_SCORE >  0.2 THEN 'Positive'
+    WHEN JOB_SAT_SENTIMENT_SCORE < -0.2 THEN 'Negative'
+    ELSE 'Neutral' END
+WHERE JOB_SAT_SENTIMENT_SCORE IS NOT NULL;
 ```
 
-**The lesson:** Cortex LLM cost is a function of row count × prompt length × tokens per call — not warehouse size. Budget LLM enrichment per row before running at scale, and always apply a `SAMPLE()` clause in development.
+**2. Sentiment applied to a numeric field.** The 2024 survey records JobSat as a 0–10 integer, not free text. This was confirmed by profiling the source CSV: 36,311 of 65,437 values are null, and the rest are 0–10. As a result:
+- `SENTIMENT()` scored numeric strings, so `JOB_SAT_SENTIMENT_SCORE`, `JOB_SAT_SENTIMENT_LABEL`, and the "Sentiment by Role" chart carry no meaningful signal.
+- The text-matching `JOB_SAT_SCORE` CASE in `03_dynamic_tables.sql` resolves to NULL.
+- Root cause: the input column was not profiled before enrichment.
 
-The revised BRD criterion reflects the production-realistic approach: apply LLM enrichment to a sampled subset, document the cost model, treat it as a conscious engineering tradeoff. The capability demonstration is unchanged — the cost governance design is improved.
+The correct approach (not executed) is to bucket the integer directly, with no LLM:
+
+```sql
+CASE
+    WHEN TRY_CAST(JOB_SAT AS INT) BETWEEN 0 AND 3  THEN 'Dissatisfied'
+    WHEN TRY_CAST(JOB_SAT AS INT) BETWEEN 4 AND 6  THEN 'Neutral'
+    WHEN TRY_CAST(JOB_SAT AS INT) BETWEEN 7 AND 10 THEN 'Satisfied'
+END
+```
+
+**3. The forecast is a capability demo, not a salary model.** `FORECAST` treats years of experience as a daily time axis. Predictions beyond the data's 51-year cap (the chart shows years 52–61) are extrapolation artifacts. The "Actual" line in the app does not apply the training view's `HAVING COUNT(*) >= 5` rule, so the tail (years 40–51) is noisy because of small cell counts.
+
+**4. Pipe defined, not used for the load.** `SURVEY_PIPE` has `AUTO_INGEST = FALSE` and was never triggered. The data loaded through the manual `COPY INTO` in `02_raw_load.sql`. The pipe demonstrates configuration, not event-driven ingestion.
+
+**5. "Where Do I Stand?" compares mismatched role labels** *(code review)*. The role dropdown lists `STANDARDIZED_ROLE` values (for example, "Backend Developer"), but the lookup filters `SALARY_BENCHMARKS.PRIMARY_DEV_ROLE`, which holds raw survey values (for example, "Developer, back-end"). The two label sets don't overlap, so the widget most likely returns "Not enough data" for every selection. It also picks the benchmark row whose median is closest to the entered salary, rather than matching on experience.
+
+**6. "Professional developer" filter is broader than its name.** The ANALYTICS filter `MAIN_BRANCH LIKE '%developer%'` also matches the 2024 answers "I am not primarily a developer…" and "I used to be a developer by profession…". Measured on the source CSV, the filter keeps 51,525 rows; restricting to "I am a developer by profession" would keep 45,367. About 6,150 rows (~12%) are not professional developers, and each of them was also sent through Cortex enrichment.
+
+**7. App input handling** *(code review)*. Filter values are interpolated into SQL f-strings, so a value containing a quote would break the query. The search query is embedded into the JSON payload unescaped, so a `"` in the query breaks the request. Fix: use Snowpark parameter binding (`session.sql(sql, params=[...])`) and build the payload with `json.dumps`.
+
+**8. Minor.** `app.py` in this repo predates the `pd.notna()` guard applied to the KPI cards in the deployed app (see `DEVLOG.md`). Search test query 2 in `06_cortex_search.sql` filters on `"United States of America"`, but `COUNTRY` is uppercased in the CLEAN layer, so that test returns no rows.
+
+---
+
+## Scope & Limitations
+
+- This is a demo on a static public dataset, built on a trial account. It is not a production system, and no stakeholder used it to make a decision.
+- An independent rebuild from `setup.md` has not been performed.
+- The forecast demonstrates the `FORECAST` API; it is not a valid model of salary growth.
 
 ---
 
@@ -124,34 +198,32 @@ The revised BRD criterion reflects the production-realistic approach: apply LLM 
 
 ```
 Snowflake Data Engineering
-├── Staged Ingestion (Internal Stage, COPY INTO, Snowpipe)
-├── Declarative Pipelines (Dynamic Tables, Medallion Architecture)
-├── SQL (DDL, DML, window functions, type casting, null handling)
-└── Cost Management (warehouse sizing, auto-suspend, LLM sampling strategy)
+├── Staged ingestion (internal stage, file format, COPY INTO, pipe definition)
+├── Declarative pipelines (Dynamic Tables, Medallion architecture)
+├── SQL (DDL, DML, window/percentile functions, type casting, null handling)
+└── Cost attribution (workload-separated warehouses, auto-suspend)
 
 Snowflake AI / ML (Cortex)
-├── LLM Functions (SENTIMENT, COMPLETE, CLASSIFY_TEXT)
-├── Machine Learning (Cortex ML FORECAST)
-└── Semantic Search (Cortex Search Service)
+├── LLM functions (SENTIMENT, CLASSIFY_TEXT, COMPLETE)
+├── Cortex ML FORECAST
+└── Cortex Search service
 
 Application Development
-└── Streamlit in Snowflake (multi-view app, native deployment)
+└── Streamlit in Snowflake (four-page app, native deployment)
 
-Data Engineering Fundamentals
-├── Medallion Architecture (RAW → CLEAN → ANALYTICS → ENRICHED)
-├── Schema-on-Read → Schema-on-Write transition
-├── Metadata tracking (_LOAD_TIMESTAMP, _SOURCE_FILE_NAME)
-├── Idempotent SQL (CREATE OR REPLACE, IF NOT EXISTS)
-└── LLM cost governance (token budgeting, sampling before enrichment)
+Engineering Practice
+├── Post-build review: re-scored success criteria against source-data profiling
+├── LLM cost root-cause analysis (row count × calls per row × tokens)
+└── Documentation that separates what ran from what should change
 ```
 
 ---
 
 ## Author
 
-**William Daluyen**  
+**William Daluyen**
 [LinkedIn](https://www.linkedin.com/in/wdaluyen/) · [GitHub](https://github.com/WDXII/)
 
 ---
 
-*Built on Snowflake Trial · Data: Stack Overflow Developer Survey 2024 (ODbL) · May 2026*
+*Built on a Snowflake trial · Data: Stack Overflow Developer Survey 2024 (ODbL) · Built May 2026 · Post-build review September 2026*
