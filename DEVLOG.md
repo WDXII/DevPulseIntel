@@ -1,62 +1,54 @@
 # DEVLOG: DevPulseIntel
 
-A log of the errors, fixes, and lessons from building DevPulseIntel, newest first. I came to Snowflake from SQL Server / T-SQL, so many entries are Snowflake-specific behaviors that differ from what I expected.
+Errors, fixes, and lessons from the build, newest first. I came from SQL Server / T-SQL, so many entries are Snowflake behaviors that differ from what I expected.
 
 ---
 
 ## 2026-09-25: Post-build review
 
-**Trigger:** I reviewed the documents against the code before using the project in job applications.
+I reviewed the docs against the code before using the project in job applications.
 
-**Found:**
-- **The docs contradicted the code.** The README and BRD had `CLASSIFY_TEXT` and `COMPLETE` swapped, used the wrong stage name (`SURVEY_STAGE` instead of `RAW_STAGE`), used the wrong warehouse names in setup, and described "Snowpipe auto-ingest" when the pipe was never triggered.
-- **JobSat is numeric.** I profiled the source CSV with pandas: JobSat is a 0–10 integer (36,311 of 65,437 null). `SENTIMENT()` ran on numbers, so the sentiment feature is meaningless, and the text-matching `JOB_SAT_SCORE` CASE returns NULL.
-- **Second cost root cause.** `04_cortex_enrich.sql` calls `SENTIMENT` three times per row and `CLASSIFY_TEXT` / `COMPLETE` twice per row. Missing sampling was not the only reason for the ~$88.
-- **The v1.1 cost criterion was marked met, but sampling was never executed.** Corrected to "not met in executed build."
-- **Row-count confusion, resolved.** I had recorded "~23K professional developers" through the layers. Profiling the CSV showed ANALYTICS holds ~51.5K rows; 23,094 is the count *with a valid salary*, which is what the app's "Developers" KPI card shows (its query filters `ANNUAL_COMP_USD IS NOT NULL`). The file itself is clean (114 fields in every record), so no rows were likely dropped at load.
-- **Filter too broad.** ~6,150 of the 51.5K ANALYTICS rows are not professional developers ("not primarily a developer", "used to be a developer"). They were all enriched and billed.
-- **Code review defects:** the "Where Do I Stand?" role labels don't match the benchmark keys; the "professional developer" filter also matches non-professionals; the app builds SQL with f-strings.
+**Found**
+- **Docs contradicted code.** README/BRD had `CLASSIFY_TEXT` and `COMPLETE` swapped, the wrong stage name (`SURVEY_STAGE`), wrong warehouse names, and "Snowpipe auto-ingest" for a pipe that never ran.
+- **JobSat is numeric** (0–10 integer; 36,311 of 65,437 null, confirmed with pandas). `SENTIMENT()` scored numbers, so sentiment output is meaningless and the text-matching `JOB_SAT_SCORE` is NULL.
+- **Second cost root cause.** `04_cortex_enrich.sql` calls `SENTIMENT` 3× and `CLASSIFY_TEXT` / `COMPLETE` 2× per row. Missing sampling wasn't the only reason for ~$88.
+- **Cost criterion mis-marked.** v1.1 said met; sampling was never executed. Corrected to "not met."
+- **Row counts.** ANALYTICS holds ~51.5K rows (51,525). The "~23K" I'd carried was the salaried count (23,094) shown by the app's KPI card, which filters `ANNUAL_COMP_USD IS NOT NULL`. The CSV is clean (114 fields per record), so no rows were likely dropped.
+- **Filter too broad.** ~6,150 ANALYTICS rows aren't professional developers; all were enriched and billed.
+- **Code defects.** "Where Do I Stand?" labels don't match benchmark keys; the developer filter is too broad; the app builds SQL with f-strings.
 
-**Constraint:** The trial account has expired, so nothing can be re-run.
+**Constraint:** trial expired, nothing can be re-run. `sql/` and `app.py` stay as executed; corrections are documented and labeled "not executed."
 
-**Did:** Kept `sql/` and `app.py` exactly as executed. Aligned README, BRD (v1.2), setup, architecture, and decisions with the code. Every correction is documented and labeled "not executed."
-
-**Learned:**
-- **Profile inputs before paying for them.** A free `SELECT DISTINCT` would have prevented the most expensive mistake in the project.
-- **Set thresholds from the data, not from intuition.** The 60% sentiment-coverage target was chosen without checking how many respondents answered JobSat (~44% overall in the source).
-- **Status marks decay.** A ✅ written during the build needs re-checking against evidence before the project is shown to anyone.
-- **Know what a number counts.** A KPI card is a filtered metric, not a row count. Record counts from `COUNT(*)` on the table, with the query saved next to the number.
+**Learned**
+- Profile inputs before paying for them. A free `SELECT DISTINCT` would have prevented the costliest mistake.
+- Set thresholds from data. The 60% sentiment target ignored that only ~44% of respondents answered JobSat.
+- Status marks decay. Re-check every ✅ against evidence before showing the project.
+- Know what a number counts. A KPI card is a filtered metric; take row counts from `COUNT(*)` and save the query beside the number.
 
 ---
 
 ## May 2026: Build
 
 ### Cost overrun (Cortex LLM)
-
-- **What happened:** Enrichment ran on the full ANALYTICS table with no sampling or cost pilot. The total was ~$88 of trial credits, ~$70 of it AI_SERVICES, against a $5 target.
-- **Learned:** LLM cost = rows × calls per row × tokens per call. Warehouse size doesn't affect it. Only a few things consume AI credits: SQL that invokes Cortex LLM/ML functions, Dynamic Table refreshes that contain Cortex functions, FORECAST training, and Cortex Search indexing. Display-only Python changes in the app cost nothing.
-- **Did:** Revised the BRD to v1.1 and wrote the Cost Retrospective. (Corrected in the 2026-09-25 review; see above.)
+Enrichment ran on the full table with no sampling or pilot: ~$88 of trial credits (~$70 AI_SERVICES) vs a $5 target. Cost = rows × calls per row × tokens per call; warehouse size doesn't matter. AI credits are consumed only by Cortex LLM/ML SQL, Dynamic Table refreshes containing Cortex functions, FORECAST training, and Cortex Search indexing. Display-only app changes are free. (Status corrected in the 2026-09-25 review.)
 
 ### Streamlit: NaN passes a truthiness check
+- **Symptom:** a KPI card errored for some filter combinations.
+- **Cause:** `MEDIAN()` / `AVG()` over no rows reach pandas as `NaN`, which is **truthy**, so `if k["MEDIAN_SALARY"]:` passed and `int(nan)` raised.
+- **Fix:** `pd.notna(k["MEDIAN_SALARY"])`. Made in the deployed app only; `app.py` here predates it, and the deployed copy was lost when the trial expired.
 
-- **Symptom:** A KPI card errored for some filter combinations.
-- **Cause:** `MEDIAN()` / `AVG()` over no rows come back to pandas as `NaN`, and `float('nan')` is **truthy** in Python. So `if k["MEDIAN_SALARY"]:` passed, and `int(nan)` raised an error.
-- **Fix:** Guard with `pd.notna(k["MEDIAN_SALARY"])` instead of bare truthiness.
-- **Note (Sept 2026):** The fix was made in the deployed app's Snowsight editor. The `app.py` in this repo is the last local copy and predates it; the deployed version was lost when the trial expired.
+### Snowflake gotchas (from SQL Server)
 
-### Snowflake syntax gotchas (coming from SQL Server)
-
-| Gotcha | What to do instead |
+| Gotcha | Instead |
 |---|---|
-| Inline `COMMENT = '...'` on a column in `CREATE TABLE` fails with `unexpected '='` | Use separate `COMMENT ON COLUMN ... IS '...'` statements after the DDL |
-| `GRANT ... ON ALL PIPES` fails with `Bulk grant on PIPE is restricted` | Grant on each pipe individually |
-| Cortex Search services don't show up in `INFORMATION_SCHEMA` | Use `SHOW CORTEX SEARCH SERVICES IN SCHEMA ...` |
-| `ROWS` is a reserved word and can't be a column alias | Use `ROW_COUNT` or similar |
-| Date arithmetic with epoch-day tricks was awkward | Use `DATEADD` / `DATEDIFF` (the forecast axis relies on this) |
-| `ACCOUNT_USAGE.COPY_HISTORY` columns aren't what you'd guess, and the view lags by up to 2 hours | Use `LAST_LOAD_TIME`, `ROW_COUNT`, `ERROR_COUNT`, `FIRST_ERROR_MESSAGE`; use `COUNT(*)` for immediate confirmation |
-| `CREATE OR REPLACE TABLE` in the wrong session context lands in the wrong schema | Always use fully qualified three-part names |
-| The survey column `Check` is a reserved word | Renamed to `CHECK_COL` in RAW |
+| Inline column `COMMENT = '...'` in `CREATE TABLE` fails (`unexpected '='`) | `COMMENT ON COLUMN ... IS '...'` after the DDL |
+| `GRANT ... ON ALL PIPES` fails (`Bulk grant on PIPE is restricted`) | Grant per pipe |
+| Cortex Search services missing from `INFORMATION_SCHEMA` | `SHOW CORTEX SEARCH SERVICES IN SCHEMA ...` |
+| `ROWS` is reserved, can't be an alias | `ROW_COUNT` |
+| Epoch-day date math was awkward | `DATEADD` / `DATEDIFF` |
+| `ACCOUNT_USAGE.COPY_HISTORY` lags up to 2 hours | Use `COUNT(*)` for instant checks; history columns: `LAST_LOAD_TIME`, `ROW_COUNT`, `ERROR_COUNT`, `FIRST_ERROR_MESSAGE` |
+| `CREATE OR REPLACE TABLE` in the wrong session context lands in the wrong schema | Use three-part names |
+| Column `Check` is reserved | Renamed `CHECK_COL` |
 
-### Documentation rule adopted
-
-- `sql/` files are the source of truth for code. `setup.md` describes how to run them and changes only when instructions change, not when code changes.
+### Documentation rule
+`sql/` is the source of truth for code. `setup.md` changes only when instructions change, not when code changes.
