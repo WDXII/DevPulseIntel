@@ -52,11 +52,28 @@ Object inventory: [`architecture.md`](./architecture.md) · Design rationale: [`
 
 ```
 DevPulseIntel/
-├── README.md · BRD.md · architecture.md · decisions.md · setup.md · DEVLOG.md
-├── sql/            # 01_staging · 02_raw_load · 03_dynamic_tables · 04_cortex_enrich · 05_cortex_ml · 06_cortex_search
-├── streamlit/app.py
-├── profiling/      # post-build checks: check_jobsat.py, check_rowcount.py
-└── screenshots/
+├── README.md
+├── BRD.md
+├── architecture.md
+├── decisions.md
+├── setup.md
+├── DEVLOG.md
+├── sql/
+│   ├── 01_staging.sql
+│   ├── 02_raw_load.sql
+│   ├── 03_dynamic_tables.sql
+│   ├── 04_cortex_enrich.sql
+│   ├── 05_cortex_ml.sql
+│   └── 06_cortex_search.sql
+├── streamlit/
+│   └── app.py
+├── profiling/              # post-build checks
+│   ├── check_jobsat.py
+│   └── check_rowcount.py
+├── screenshots/
+│   ├── 01_salary_explorer_experience_and_bands.png
+│   └── 02_cortex_ml_salary_forecast.png
+└── data/                   # survey CSV goes here (not committed)
 ```
 
 ## Quick Start
