@@ -23,7 +23,7 @@ A **Snowflake Cortex capabilities demo** on the Stack Overflow Developer Survey 
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     CSV["survey_results_public.csv"] --> STAGE["INGESTION.RAW_STAGE"]
     STAGE -->|"COPY INTO"| RAW["RAW.RAW_SURVEY_RESPONSES"]
     RAW -->|"Dynamic Table"| CLEAN["CLEAN.DT_CLEAN_RESPONSES"]
@@ -31,9 +31,9 @@ flowchart LR
     ANALYTICS -->|"INSERT + Cortex UPDATEs"| ENRICHED["ENRICHED.ENRICHED_RESPONSES"]
     ENRICHED --> ML["SALARY_FORECAST_MODEL<br/>and SALARY_BENCHMARKS"]
     ENRICHED --> SEARCH["DEVPULSE_SEARCH"]
-    ENRICHED --> APP["Streamlit app"]
-    ML --> APP
+    ML --> APP["Streamlit app"]
     SEARCH --> APP
+    ENRICHED --> APP
 ```
 
 Object inventory: [`architecture.md`](./architecture.md) · Design rationale: [`decisions.md`](./decisions.md)
