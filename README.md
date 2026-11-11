@@ -23,6 +23,7 @@ A **Snowflake Cortex capabilities demo** on the Stack Overflow Developer Survey 
 ## Architecture
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 20, 'rankSpacing': 25, 'padding': 8}, 'themeVariables': {'fontSize': '13px'}}}%%
 flowchart TB
     CSV["survey_results_public.csv"] --> STAGE["INGESTION.RAW_STAGE"]
     STAGE -->|"COPY INTO"| RAW["RAW.RAW_SURVEY_RESPONSES"]
