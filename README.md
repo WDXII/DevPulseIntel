@@ -1,13 +1,37 @@
 # DevPulseIntel
 
-A **Snowflake Cortex capabilities demo** on the Stack Overflow Developer Survey 2024 (65,437 respondents). Every layer is Snowflake-native: no external orchestrator, storage, or compute. It also includes a documented post-build review.
+> A Snowflake-native analytics platform on the Stack Overflow Developer Survey 2024, built with Dynamic Tables, Cortex AI, and Streamlit in Snowflake
+
+[![Platform](https://img.shields.io/badge/Platform-Snowflake-29B5E8)](https://www.snowflake.com)
+[![AI/ML](https://img.shields.io/badge/AI%2FML-Snowflake%20Cortex-29B5E8)](https://docs.snowflake.com/en/user-guide/snowflake-cortex/overview)
+[![App](https://img.shields.io/badge/App-Streamlit%20in%20Snowflake-FF4B4B)](https://docs.snowflake.com/en/developer-guide/streamlit/about-streamlit)
+[![Data](https://img.shields.io/badge/Data-Stack%20Overflow%20Survey%202024-F58025)](https://survey.stackoverflow.co/)
+[![Status](https://img.shields.io/badge/Status-Complete%20(trial%20expired)-lightgrey)](#known-issues--post-build-review)
 
 > **Status:** Complete. Built May 2026 on a trial account that has since expired.
 > The SQL and app code here are **what ran**, except `app.py`, which predates a small NaN fix made in the deployed app (Known Issue 8). Issues found afterward are documented under [Known Issues](#known-issues--post-build-review), not patched, so code, results, and screenshots stay consistent.
 
 ---
 
+## What This Project Does
+
+Most data engineering portfolios stop at ingestion and transformation. DevPulseIntel fills a specific gap: hands-on work with Snowflake-native AI/ML and the application layer, using only Snowflake services (no external orchestrator, storage, or compute).
+
+It takes the 2024 Stack Overflow Developer Survey (65,437 respondents) through a Medallion pipeline and:
+
+1. **Ingests** the survey CSV through an internal stage and `COPY INTO` (a pipe is defined but was never triggered)
+2. **Cleans and filters** it with Dynamic Tables (RAW → CLEAN → ANALYTICS, 51,525 in-scope rows)
+3. **Enriches** it with Cortex LLM functions (sentiment, role standardization, skill clustering)
+4. **Models and searches** it with Cortex ML `FORECAST` and a Cortex Search service
+5. **Surfaces** results in a four-page Streamlit in Snowflake app
+
+It also includes a documented post-build review: defects and missed targets are recorded in [Results](#results-vs-success-criteria) and [Known Issues](#known-issues--post-build-review), not hidden.
+
+---
+
 ## What It Demonstrates
+
+Platform: a Snowflake trial account (since expired). Version control: GitHub.
 
 | Capability | Implementation |
 |---|---|
@@ -16,6 +40,7 @@ A **Snowflake Cortex capabilities demo** on the Stack Overflow Developer Survey 
 | **Cortex LLM** | `SENTIMENT` (job satisfaction) · `CLASSIFY_TEXT` (roles, AI attitude) · `COMPLETE` with `mistral-7b` (skill clusters) |
 | **Cortex ML** | `FORECAST` with experience as a pseudo-time axis (capability demo, not a salary model) |
 | **Cortex Search** | `DEVPULSE_SEARCH` over a composite profile text |
+| **Profiling** | Python 3 and pandas, post-build checks only (`profiling/`) |
 | **Streamlit in Snowflake** | Four pages on `DEVPULSE_APP_WH`: Salary Explorer, AI Adoption, Skill Demand, Semantic Search |
 
 ---
@@ -41,11 +66,36 @@ Object inventory: [`architecture.md`](./architecture.md) · Design rationale: [`
 
 ---
 
+## Pipeline Layers
+
+| Layer | Schema / object | What happens |
+|---|---|---|
+| Ingestion | `INGESTION.RAW_STAGE`, `SURVEY_CSV_FORMAT`, `SURVEY_PIPE` | Internal stage and CSV file format; pipe defined with `AUTO_INGEST = FALSE` |
+| RAW | `RAW.RAW_SURVEY_RESPONSES` | 114 survey columns, all VARCHAR, plus load metadata. Loaded by manual `COPY INTO` |
+| CLEAN | `CLEAN.DT_CLEAN_RESPONSES` | Renames and casts columns; salary values under $100 or over $2M set to NULL |
+| ANALYTICS | `ANALYTICS.DT_ANALYTICS_DEVELOPERS` | Filters to developers; derives experience buckets and salary bands |
+| ENRICHED | `ENRICHED.ENRICHED_RESPONSES` | Materialized table: `INSERT` seed, then one Cortex `UPDATE` per task |
+| ML | `SALARY_FORECAST_RESULTS`, `SALARY_BENCHMARKS` | `FORECAST` output (80% interval) and pre-aggregated percentiles |
+| Search | `DEVPULSE_SEARCH` | Cortex Search over a composite profile text |
+| App | `streamlit/app.py` | Salary Explorer, AI Adoption, Skill Demand, Semantic Search |
+
+Full object inventory: [`architecture.md`](./architecture.md).
+
+---
+
 ## Screenshots
+
+Two of the four app pages were captured before the trial expired.
 
 ![Median salary by years of experience and developer distribution across salary bands](screenshots/01_salary_explorer_experience_and_bands.png)
 
 ![Cortex ML FORECAST showing actual vs predicted developer salaries with 80% prediction intervals](screenshots/02_cortex_ml_salary_forecast.png)
+
+---
+
+## Data Source
+
+**Stack Overflow Developer Survey 2024**, 65,437 respondents, released under the ODbL. Download `survey_results_public.csv` from https://survey.stackoverflow.co/. The CSV is not in this repository (too large for GitHub).
 
 ---
 
@@ -77,13 +127,39 @@ DevPulseIntel/
 └── data/                   # survey CSV goes here (not committed)
 ```
 
-## Quick Start
+---
+
+## Getting Started
+
+**Prerequisites:** a Snowflake trial account with Cortex AI features available in its region, and the `ACCOUNTADMIN` role during setup.
 
 1. Download the 2024 survey from https://survey.stackoverflow.co/ and extract `survey_results_public.csv`.
 2. Follow [`setup.md`](./setup.md) (about 2 hours). It adds input profiling and sampling, which the original build skipped.
 3. Run `sql/01`–`06` in order, then deploy `streamlit/app.py` as a Streamlit in Snowflake app.
 
-The `profiling/` scripts need only Python and pandas. Put the CSV in `data/` (not committed; too large for GitHub) and run `python profiling/check_jobsat.py` from the repo root, or pass a path as an argument.
+The `profiling/` scripts need only Python and pandas. Put the CSV in `data/` (not committed) and run `python profiling/check_jobsat.py` from the repo root, or pass a path as an argument.
+
+---
+
+## Key Design Decisions
+
+Full rationale and hindsight notes are in [`decisions.md`](./decisions.md).
+
+| ID | Decision | Why |
+|---|---|---|
+| D-01 | Snowflake-native only | The goal is platform depth. Trade-off: no scheduling, tests, or CI |
+| D-02 | Four-layer Medallion plus an `INGESTION` schema | Each script maps to one layer |
+| D-03 | RAW stores everything as VARCHAR | Loads never fail on types. It also hid that JobSat is numeric |
+| D-04 | `COPY INTO`; pipe defined, not triggered | One static file, so event-driven ingestion adds nothing |
+| D-05 | Dynamic Tables with a 9999-day lag | Declarative pipeline with no refresh cost on a trial account |
+| D-06 | Four XS warehouses split by workload | Cost is attributable per stage. Cortex LLM bills separately as AI_SERVICES |
+| D-07 | Materialize Cortex outputs | A view would re-bill the LLM on every app query |
+| D-08 | `CLASSIFY_TEXT` for roles, `COMPLETE` for clusters | Demonstrates all three LLM functions. A mapping table would be cheaper for roles |
+| D-09 | Experience as a pseudo-time axis for `FORECAST` | `FORECAST` needs a time axis. Kept as a capability demo, not a valid salary model |
+| D-10 | Pre-aggregated salary benchmarks | Instant, free lookups. The widget that reads them has a label mismatch (Known Issue 5) |
+| D-11 | Cortex Search over a composite profile text | One searchable string per respondent, with categorical filter attributes |
+| D-12 | Sample the Cortex enrichment | Revised twice and never executed. Profile inputs and pilot on ~100 rows first |
+| D-13 | Document findings instead of patching | The trial expired, so code, results, and screenshots stay consistent |
 
 ---
 
@@ -102,6 +178,43 @@ The target was under $5. The build used **~$88 of trial credits**, ~$70 of it AI
 **Rebuild plan (not executed):** profile every input first (`SELECT DISTINCT ... LIMIT 20`); pilot each Cortex step on 100 rows and extrapolate; sample only the Cortex steps, not the seed table (`decisions.md` D-12); call each function once per row and derive labels from the stored result. Estimated AI_SERVICES cost: **~$3–4** (extrapolated, unverified).
 
 **Lesson:** warehouse size doesn't control LLM cost. Measure a small batch before you scale.
+
+---
+
+## Results vs. Success Criteria
+
+Scored in [`BRD.md`](./BRD.md) §9 after the post-build review.
+
+| Criterion | Status |
+|---|---|
+| Six Snowflake capabilities demonstrated | ✅ Met. The pipe was defined but the load ran via manual `COPY INTO` |
+| Working Streamlit app (four views) | ✅ Met. One widget has a logic defect (Known Issue 5) |
+| Enrichment materialized in tables | ✅ Met |
+| Enrichment coverage | ❌ Sentiment not met (about 55.7% answered JobSat, and the input is numeric) |
+| Cost-conscious enrichment | ❌ Not met. See [Cost Profile](#cost-profile) |
+| Documentation consistent with code | ✅ Met after the v1.2 alignment |
+| Reproducible from `setup.md` | ⚠️ Untested. No independent rebuild; the trial has expired |
+
+---
+
+## Skills Demonstrated
+
+- **Data engineering:** staged ingestion, Dynamic Tables, Medallion architecture, SQL (window/percentile functions, casting, null handling), cost attribution
+- **Snowflake AI/ML:** Cortex LLM functions, FORECAST, Cortex Search
+- **Applications:** Streamlit in Snowflake (four pages)
+- **Engineering practice:** post-build review against source-data profiling, LLM cost root-cause analysis, docs that separate what ran from what should change
+
+---
+
+## Documents
+
+| Document | Purpose |
+|---|---|
+| [BRD.md](BRD.md) | Business requirements, scope, functional requirements with as-built notes, success criteria, risk register |
+| [architecture.md](architecture.md) | Object inventory as actually created |
+| [decisions.md](decisions.md) | Design decisions D-01 to D-13, with hindsight notes |
+| [setup.md](setup.md) | Step-by-step rebuild guide, including the profiling and sampling steps the original build skipped |
+| [DEVLOG.md](DEVLOG.md) | Build log and lessons learned |
 
 ---
 
@@ -151,13 +264,6 @@ END
 - A demo on a static public dataset, built on a trial account. Not a production system; no stakeholder used it for a decision.
 - No independent rebuild from `setup.md` has been performed.
 - The forecast demonstrates the `FORECAST` API; it isn't a valid model of salary growth.
-
-## Skills Demonstrated
-
-- **Data engineering:** staged ingestion, Dynamic Tables, Medallion architecture, SQL (window/percentile functions, casting, null handling), cost attribution
-- **Snowflake AI/ML:** Cortex LLM functions, FORECAST, Cortex Search
-- **Applications:** Streamlit in Snowflake (four pages)
-- **Engineering practice:** post-build review against source-data profiling, LLM cost root-cause analysis, docs that separate what ran from what should change
 
 ---
 
